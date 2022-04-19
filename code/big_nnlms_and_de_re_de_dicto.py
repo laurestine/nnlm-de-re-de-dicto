@@ -1,1 +1,551 @@
-{"metadata":{"kernelspec":{"language":"python","display_name":"Python 3","name":"python3"},"language_info":{"pygments_lexer":"ipython3","nbconvert_exporter":"python","version":"3.6.4","file_extension":".py","codemirror_mode":{"name":"ipython","version":3},"name":"python","mimetype":"text/x-python"}},"nbformat_minor":4,"nbformat":4,"cells":[{"cell_type":"code","source":"import torch\nimport json\nimport string\nimport csv\nfrom transformers import AutoTokenizer, AutoModelForMaskedLM\n\nprint(\"Loading model and tokenizer.\")\n\ntokenizer = AutoTokenizer.from_pretrained(\"../input/roberta-finetuned-for-wsc/\")\nmodel = AutoModelForMaskedLM.from_pretrained(\"../input/roberta-finetuned-for-wsc/\")\n\nmodel.eval()\ntorch.no_grad()\n\nprint(\"Model and Tokenizer ready!\")\n\n#######################################################################\n######## Validating that the imported model does well on WSC ##########\n#######################################################################\n\n# Get Winograd validation set\nval_raw = open(\"../input/winograd/val.jsonl\",encoding='utf-8')\nmasktoken = \"<mask>\"\n(masktoken_id,) = set(tokenizer.encode(masktoken))-set([0,2])\npctn = string.punctuation\n\n# Combines words into a sentence.\ndef make_sentence(words: list):\n    running_string = \"\"\n    for i in range(len(words)):\n        if i < len(words)-1:\n            if words[i+1] == \".\":\n                running_string = running_string+words[i]\n            else:\n                running_string = running_string+words[i]+\" \"\n        else:\n            running_string = running_string+words[i]\n    return running_string\n\n# Replaces pronoun with mask token in a test sentence.\ndef mask_given_dict(sentence, dictionary):\n    pronoun_index = dictionary['target']['span2_index']\n    s_as_list = sentence.split()\n    s_as_list[pronoun_index] = masktoken\n    return make_sentence(s_as_list)\n\nprint(\"Evaluating RoBERTa on WSC.\")\n\n# Loop through the validation set,\n# feeding each one into the model.\nlist_for_checking = []\ncount = 0\nnum_correct = 0\nfor i in val_raw:\n    jsonned = json.loads(i)\n    text = jsonned['text']\n    # We replace the pronoun to resolve with a mask token.\n    masked_text = mask_given_dict(text,jsonned)\n    pronoun = jsonned['target']['span2_text']\n    tokenized = tokenizer(masked_text, return_tensors=\"pt\")\n    logits = model(**tokenized).logits\n    mask_index = (tokenized['input_ids'][0]==masktoken_id).nonzero().item()\n    # We check, among all of the other words in the sentence,\n    # which one has the highest score to replace the mask token.\n    candidates = [tokenizer.encode(x) for x in masked_text.split()]\n    candidates = candidates + [tokenizer.encode(x) for x in [\" \"+y for y in masked_text.split()]]\n    cset = set()\n    for i in candidates:\n        for j in i:\n            cset.add(j)\n    cset = cset - set([0,2,masktoken_id])\n    notsoemptydict = dict()      \n    for i in cset:\n        notsoemptydict[i] = logits[:,mask_index,:][0][i]\n    pred_word = tokenizer.decode(max(notsoemptydict, key=notsoemptydict.get))\n    # We predict True if the selected word appears in the target span,\n    # and False otherwise.\n    if pred_word.strip() in jsonned['target']['span1_text']:\n        pred_label = True\n    else:\n        pred_label = False\n    if pred_label == jsonned['label']:\n        num_correct = num_correct+1\n    # print(\"Round \",'###',count,\"###\",\"over.\")\n    count = count+1\n    list_for_checking.append([jsonned['target']['span1_text'],pred_word,jsonned['label'],pred_label])\n\nprint(\"Accuracy: \",list_for_checking/count)\n\n#######################################################################\n# Ensuring that we only select professions that tokenize as one word. #\n#######################################################################\n\nprint(\"Processing professions.\")\n\nprofessions_raw = []\nwith open(\"../input/professions/professions.txt\",encoding='utf-8') as f:\n    for line in f:\n        professions_raw.append(line)\nfor i in range(len(professions_raw)-1):\n    professions_raw[i] = professions_raw[i][:-1]\n\nprofessions_tokenized = {}\nfor i in professions_raw:\n    professions_tokenized[i] = (tokenizer(i, return_tensors=\"pt\"),tokenizer(' '+i, return_tensors=\"pt\"))\n\nprofessions_available_with_space = []\nprofessions_available_no_space = []\nprofessions_available_both = []\nfor i in professions_tokenized.keys():\n    if professions_tokenized[i][0]['input_ids'].shape[1] == 3:\n        professions_available_no_space.append(i)\n        if professions_tokenized[i][1]['input_ids'].shape[1] == 3:\n            professions_available_both.append(i)\n    if professions_tokenized[i][1]['input_ids'].shape[1] == 3:\n        professions_available_with_space.append(i)\n\nwith open(\"professions-filtered.txt\",mode='w',encoding='utf-8') as f:\n    for i in professions_available_with_space:\n        f.write(i+'\\n')\n\n#######################################################################\n##################### Generating test sentences #######################\n#######################################################################\n\nprint(\"Generating test sentences.\")\n\n# Vowels used to determine if indefinite is \"a\" or \"an\".\nvowels = ['a','e','i','o','u']\n\nNPs_list = []\nwith open(\"../input/professions/professions-filtered.txt\",encoding=\"utf-8\") as NPs:\n    for line in NPs:\n        NPs_list.append(line.casefold().strip())\n\nintensional_verbs_list = [[],[]]\nwith open(\"../input/verbs-for-use/intensional_verbs.txt\",encoding=\"utf-8\") as intensional_verbs:            \n    for line in intensional_verbs:\n        temp = line.split('/')\n        intensional_verbs_list[0].append(temp[0].strip().casefold())\n        intensional_verbs_list[1].append(temp[1].strip().casefold())\n\nintensional_verbs_nf_list = [[],[]]\nwith open(\"../input/verbs-for-use/intensional_verbs_nf.txt\",encoding=\"utf-8\") as intensional_verbs_nf: \n    for line in intensional_verbs_nf:\n        temp = line.split('/')\n        intensional_verbs_nf_list[0].append(temp[0].strip().casefold())\n        intensional_verbs_nf_list[1].append(temp[1].strip().casefold())\n\nintransitive_verbs_list = []\nwith open(\"../input/verbs-for-use/intransitive_verbs.txt\",encoding=\"utf-8\") as intransitive_verbs: \n    for line in intransitive_verbs:\n        intransitive_verbs_list.append(line.casefold().strip())\n\nperceptual_verbs_list = [[],[]]\nwith open(\"../input/verbs-for-use/perceptual_verbs.txt\",encoding=\"utf-8\") as perceptual_verbs: \n    for line in perceptual_verbs:\n        temp = line.split('/')\n        perceptual_verbs_list[0].append(temp[0].strip())\n        perceptual_verbs_list[1].append(temp[1].strip())\n\nmatrix_subjects = [\"John\",\"Mary\"]\n\ndef word2sentence(words: list):\n    string = \"\"\n    for word in words:\n        string = string+word+\" \"\n    string=string[:-1]+\".\"\n    return string\n\ndef copula_generator(tense, tensedlist):\n    if tense == tensedlist[0]:\n        return \"is\"\n    if tense == tensedlist[1]:\n        return \"was\"\n\ndef pst_or_prs(copula):\n    if copula == \"is\":\n        return \"prs\"\n    if copula == \"was\":\n        return \"pst\"\n\ndeictic = \"that\"\nnpi = \"any\"\ndictlist_test = []\ndictlist_deictic = []\ndictlist_npi = []\ndictlist_perceptual = []\ncount=0\n\n# Code used to randomly select embedded subjects and embedded verbs:\n''' Here's how we got these indices:\nimport random\nitv_numbers = random.sample(range(len(intransitive_verbs_list)-1),18)\nnp_numbers = random.sample(range(len(NPs_list)-1),18)\n> itv_numbers\n[35, 18, 39, 23, 16, 46, 26, 41, 34, 33, 27, 2, 14, 32, 31, 3, 6, 42]\n> np_numbers\n[188, 161, 160, 72, 61, 6, 165, 123, 53, 35, 5, 195, 87, 11, 48, 187, 49, 175]\n'''\n\n# The resulting embedded subjects and embedded verbs:\nitv_numbers = [35, 18, 39, 23, 16, 46, 26, 41, 34, 33, 27, 2, 14, 32, 31, 3, 6, 42]\nnp_numbers = [188, 161, 160, 72, 61, 6, 165, 123, 53, 35, 5, 195, 87, 11, 48, 187, 49, 175]\nintransitive_verbs_list = [intransitive_verbs_list[i] for i in itv_numbers]\nNPs_list = [NPs_list[i] for i in np_numbers]\n\n# Generating a dictionary of sentences and their data:\nfor subject in matrix_subjects:\n    for tense in intensional_verbs_list:\n        for intransitive_verb in intransitive_verbs_list:\n            for np in NPs_list:\n                if np[0] in vowels:\n                    article = \"an\"\n                if np[0] not in vowels:\n                    article = \"a\"\n                for verb in tense:\n                    s1 = word2sentence([subject,verb,article,np,\n                                        copula_generator(tense, intensional_verbs_list),\n                                        intransitive_verb])\n                    s1_deictic = word2sentence([subject,verb,deictic,np,\n                                        copula_generator(tense, intensional_verbs_list),\n                                        intransitive_verb])\n                    s1_npi = word2sentence([subject,verb,npi,np,\n                                        copula_generator(tense, intensional_verbs_list),\n                                        intransitive_verb])\n                    s2 = \"I met <mask>.\"\n                    text_test = s1+\" \"+s2\n                    text_deictic = s1_deictic+\" \"+s2\n                    text_npi = s1_npi+\" \"+s2\n                    ltest = text_test.split()\n                    ldeictic = text_deictic.split()\n                    lnpi = text_npi.split()\n                    dict_test = {\"type\": \"test\", \"text\":text_test,\n                                 \"options\":[subject,np],\"mask_index\":len(ltest)-1,\n                                 \"idx\": count,\"tense\": pst_or_prs(copula_generator(tense, intensional_verbs_list)), \n                               \"main_verb\": verb, \"emb_verb\": intransitive_verb, \"NP\": np}\n                    dict_deictic = {\"type\": \"deictic\", \"text\":text_deictic,\n                                 \"options\":[subject,np],\"mask_index\":len(ldeictic)-1,\n                                 \"idx\": count,\"tense\": pst_or_prs(copula_generator(tense, intensional_verbs_list)), \n                               \"main_verb\": verb, \"emb_verb\": intransitive_verb, \"NP\": np}\n                    dict_npi = {\"type\": \"deictic\", \"text\":text_npi,\n                                 \"options\":[subject,np],\"mask_index\":len(lnpi)-1,\n                                 \"idx\": count,\"tense\": pst_or_prs(copula_generator(tense, intensional_verbs_list)), \n                               \"main_verb\": verb, \"emb_verb\": intransitive_verb, \"NP\": np}\n                    dictlist_test.append(dict_test)\n                    dictlist_deictic.append(dict_deictic)\n                    dictlist_npi.append(dict_npi) \n                    count = count+1\n                    \n    for tense in intensional_verbs_nf_list:\n        for intransitive_verb in intransitive_verbs_list:\n            for np in NPs_list:\n                if np[0] in vowels:\n                    article = \"an\"\n                if np[0] not in vowels:\n                    article = \"a\"\n                for verb in tense:\n                    s1 = word2sentence([subject,verb,article,np,\n                                        \"to\",\"be\",\n                                        intransitive_verb])\n                    s1_deictic = word2sentence([subject,verb,deictic,np,\n                                        \"to\",\"be\",\n                                        intransitive_verb])\n                    s1_npi = word2sentence([subject,verb,npi,np,\n                                        \"to\",\"be\",\n                                        intransitive_verb])\n                    s2 = \"I met <mask>.\"\n                    text_test = s1+\" \"+s2\n                    text_deictic = s1_deictic+\" \"+s2\n                    text_npi = s1_npi+\" \"+s2\n                    ltest = text_test.split()\n                    ldeictic = text_deictic.split()\n                    lnpi = text_npi.split()\n                    dict_test = {\"type\": \"test\", \"text\":text_test,\n                                 \"options\":[subject,np],\"mask_index\":len(ltest)-1,\n                                 \"idx\": count,\"tense\": pst_or_prs(copula_generator(tense, intensional_verbs_nf_list)), \n                               \"main_verb\": verb, \"emb_verb\": intransitive_verb, \"NP\": np}\n                    dict_deictic = {\"type\": \"deictic\", \"text\":text_deictic,\n                                 \"options\":[subject,np],\"mask_index\":len(ldeictic)-1,\n                                 \"idx\": count,\"tense\": pst_or_prs(copula_generator(tense, intensional_verbs_nf_list)), \n                               \"main_verb\": verb, \"emb_verb\": intransitive_verb, \"NP\": np}\n                    dict_npi = {\"type\": \"npi\", \"text\":text_npi,\n                                 \"options\":[subject,np],\"mask_index\":len(lnpi)-1,\n                                 \"idx\": count,\"tense\": pst_or_prs(copula_generator(tense, intensional_verbs_nf_list)), \n                               \"main_verb\": verb, \"emb_verb\": intransitive_verb, \"NP\": np}\n                    dictlist_test.append(dict_test)\n                    dictlist_deictic.append(dict_deictic)\n                    dictlist_npi.append(dict_npi)\n                    count = count+1\n                    \n    for tense in perceptual_verbs_list:\n        for intransitive_verb in intransitive_verbs_list:\n            for np in NPs_list:\n                if np[0] in vowels:\n                    article = \"an\"\n                if np[0] not in vowels:\n                    article = \"a\"\n                for verb in tense:\n                    s1 = word2sentence([subject,verb,article,np,intransitive_verb])\n                    s1_deictic = word2sentence([subject,verb,deictic,np,intransitive_verb])\n                    s2 = \"I met <mask>.\"\n                    text_test = s1+\" \"+s2\n                    text_deictic = s1_deictic+\" \"+s2\n                    ltest = text_test.split()\n                    ldeictic = text_deictic.split()\n                    dict_test = {\"type\": \"perc_reg\", \"text\":text_test,\n                                 \"options\":[subject,np],\"mask_index\":len(ltest)-1,\n                                 \"idx\": count,\"tense\": pst_or_prs(copula_generator(tense, perceptual_verbs_list)), \n                               \"main_verb\": verb, \"emb_verb\": intransitive_verb, \"NP\": np}\n                    dict_deictic = {\"type\": \"perc_deictic\", \"text\":text_deictic,\n                                 \"options\":[subject,np],\"mask_index\":len(ldeictic)-1,\n                                 \"idx\": count,\"tense\": pst_or_prs(copula_generator(tense, perceptual_verbs_list)), \n                               \"main_verb\": verb, \"emb_verb\": intransitive_verb, \"NP\": np}\n                    dictlist_perceptual.append(dict_test)\n                    dictlist_perceptual.append(dict_deictic)\n                    count = count+1\n\nprint(\"Lists ready!\")\n\nwith open('test_sentences.txt', 'w') as file:\n    for sentence in dictlist_test:\n        file.write(str(sentence)+'\\n')\n    \nwith open('deictic_sentences.txt', 'w') as file:\n    for sentence in dictlist_deictic:\n        file.write(str(sentence)+'\\n')\n\nwith open('npi_sentences.txt', 'w') as file:\n    for sentence in dictlist_npi:\n        file.write(str(sentence)+'\\n')\n    \nwith open('perceptual_sentences.txt', 'w') as file:\n    for sentence in dictlist_perceptual:\n        file.write(str(sentence)+'\\n')\n\n\n#######################################################################\n#################### Computing Scores of Sentences ####################\n#######################################################################\n\n# Helper functions for computing scores for each sentence in the data.\ndef compute_scores(dictionary: dict):\n    text = dictionary['text']\n    text_tokenized = tokenizer(text,return_tensors=\"pt\")\n    logits_text = model(**text_tokenized).logits\n    mask_index = (text_tokenized['input_ids'][0]==masktoken_id).nonzero().item()\n    options = dictionary['options']\n    options_tokens = [tokenizer(\" \"+option)['input_ids'][1] for option in options]\n    scores = [logits_text[:,mask_index,:][0][token] for token in options_tokens]\n    return scores\n\nheader = [\"index\",\"type\",\"text\",\"matrix_subject\",\"emb_subject\",\n          \"matrix_verb\",\"emb_verb\",\"tense\",\"matrix_subj_score\",\"emb_subj_score\"]\n\nn_indices_reg = len(dictlist_test)\nn_indices_perc = len(dictlist_perceptual)\nquarter_reg = int(n_indices_reg/4)\nquarter_perc = int(n_indices_perc/4)\n\n# Data is split into quarters to more easily run with limited GPU time.\n\nprint(\"Generating model scores.\")\n\n#################### QUARTER 1 ######################\nprint(\"Computing on the first quarter of data.\")\nwith open('q1_of_data.csv', 'w',newline='') as file:\n    writer = csv.writer(file)\n    writer.writerow(header)\n    for i in range(quarter_reg):\n        if i == 50:\n            print(\"reached 50!\")\n        if i == 1000:\n            print(\"reached 1k!\")\n        if i == 5000:\n            print(\"reached 5k!\")\n        if i == 10000:\n            print(\"reached 10k!\")\n        dict_test = dictlist_test[i]\n        dict_deictic = dictlist_deictic[i]\n        dict_npi = dictlist_npi[i]\n        internal_dictlist = [dict_test,dict_deictic,dict_npi]\n        scores = (compute_scores(dict_test),compute_scores(dict_deictic),compute_scores(dict_npi))\n        rows = []\n        for j in range(len(internal_dictlist)):\n            rows.append([\n                        internal_dictlist[j]['idx'], internal_dictlist[j]['type'],\n                        internal_dictlist[j]['text'],internal_dictlist[j]['options'][0],\n                        internal_dictlist[j]['options'][1],internal_dictlist[j]['main_verb'],\n                        internal_dictlist[j]['emb_verb'],internal_dictlist[j]['tense'],\n                        scores[j][0],scores[j][1]\n                        ])\n        writer.writerows(rows)\n    for i in range(quarter_perc):\n        if i == 50:\n            print(\"reached 50!\")\n        if i == 1000:\n            print(\"reached 1k!\")\n        if i == 5000:\n            print(\"reached 5k!\")\n        dictionary = dictlist_perceptual[i]\n        scores = compute_scores(dictionary)\n        writer.writerow([\n                        dictionary['idx'], dictionary['type'], \n                        dictionary['text'], dictionary['options'][0],\n                        dictionary['options'][1], dictionary['main_verb'],\n                        dictionary['emb_verb'], dictionary['tense'],\n                        scores[0],scores[1]\n                        ])\n\n#################### QUARTER 2 ######################\nprint(\"Computing on the second quarter of data.\")\nwith open('q2_of_data.csv', 'w',newline='') as file:\n    writer = csv.writer(file)\n    writer.writerow(header)\n    for i in range(quarter_reg,(quarter_reg*2)):\n        if i == quarter_reg + 50:\n            print(\"reached 50!\")\n        if i == quarter_reg + 1000:\n            print(\"reached 1k!\")\n        if i == quarter_reg + 5000:\n            print(\"reached 5k!\")\n        if i == quarter_reg + 10000:\n            print(\"reached 10k!\")\n        dict_test = dictlist_test[i]\n        dict_deictic = dictlist_deictic[i]\n        dict_npi = dictlist_npi[i]\n        internal_dictlist = [dict_test,dict_deictic,dict_npi]\n        scores = (compute_scores(dict_test),compute_scores(dict_deictic),compute_scores(dict_npi))\n        rows = []\n        for j in range(len(internal_dictlist)):\n            rows.append([\n                        internal_dictlist[j]['idx'], internal_dictlist[j]['type'],\n                        internal_dictlist[j]['text'],internal_dictlist[j]['options'][0],\n                        internal_dictlist[j]['options'][1],internal_dictlist[j]['main_verb'],\n                        internal_dictlist[j]['emb_verb'],internal_dictlist[j]['tense'],\n                        scores[j][0],scores[j][1]\n                        ])\n        writer.writerows(rows)\n    for i in range(quarter_perc,(quarter_perc*2)):\n        if i == quarter_perc + 50:\n            print(\"reached 50!\")\n        if i == quarter_perc + 1000:\n            print(\"reached 1k!\")\n        if i == quarter_perc + 5000:\n            print(\"reached 5k!\")\n        dictionary = dictlist_perceptual[i]\n        scores = compute_scores(dictionary)\n        writer.writerow([\n                        dictionary['idx'], dictionary['type'], \n                        dictionary['text'], dictionary['options'][0],\n                        dictionary['options'][1], dictionary['main_verb'],\n                        dictionary['emb_verb'], dictionary['tense'],\n                        scores[0],scores[1]\n                        ])\n\n\n#################### QUARTER 3 ######################\nprint(\"Computing on the third quarter of data.\")\nwith open('q3_of_data.csv', 'w',newline='') as file:\n    writer = csv.writer(file)\n    writer.writerow(header)\n    for i in range((quarter_reg*2),(quarter_reg*3)):\n        if i == quarter_reg*2 + 50:\n            print(\"reached 50!\")\n        if i == quarter_reg*2 + 1000:\n            print(\"reached 1k!\")\n        if i == quarter_reg*2 + 5000:\n            print(\"reached 5k!\")\n        if i == quarter_reg*2 + 10000:\n            print(\"reached 10k!\")\n        dict_test = dictlist_test[i]\n        dict_deictic = dictlist_deictic[i]\n        dict_npi = dictlist_npi[i]\n        internal_dictlist = [dict_test,dict_deictic,dict_npi]\n        scores = (compute_scores(dict_test),compute_scores(dict_deictic),compute_scores(dict_npi))\n        rows = []\n        for j in range(len(internal_dictlist)):\n            rows.append([\n                        internal_dictlist[j]['idx'], internal_dictlist[j]['type'],\n                        internal_dictlist[j]['text'],internal_dictlist[j]['options'][0],\n                        internal_dictlist[j]['options'][1],internal_dictlist[j]['main_verb'],\n                        internal_dictlist[j]['emb_verb'],internal_dictlist[j]['tense'],\n                        scores[j][0],scores[j][1]\n                        ])\n        writer.writerows(rows)\n    for i in range((quarter_perc*2),(quarter_perc*3)):\n        if i == quarter_perc*2 + 50:\n            print(\"reached 50!\")\n        if i == quarter_perc*2 + 1000:\n            print(\"reached 1k!\")\n        if i == quarter_perc*2 + 5000:\n            print(\"reached 5k!\")\n        dictionary = dictlist_perceptual[i]\n        scores = compute_scores(dictionary)\n        writer.writerow([\n                        dictionary['idx'], dictionary['type'], \n                        dictionary['text'], dictionary['options'][0],\n                        dictionary['options'][1], dictionary['main_verb'],\n                        dictionary['emb_verb'], dictionary['tense'],\n                        scores[0],scores[1]\n                        ])\n    \n     \n#################### QUARTER 4 ######################\nprint(\"Computing on the fourth quarter of data.\")\nwith open('q4_of_data.csv', 'w',newline='') as file:\n    writer = csv.writer(file)\n    writer.writerow(header)\n    for i in range((quarter_reg*3),(quarter_reg*4)):\n        if i == quarter_reg*3 + 50:\n            print(\"reached 50!\")\n        if i == quarter_reg*3 + 1000:\n            print(\"reached 1k!\")\n        if i == quarter_reg*3 + 5000:\n            print(\"reached 5k!\")\n        if i == quarter_reg*3 + 10000:\n            print(\"reached 10k!\")\n        dict_test = dictlist_test[i]\n        dict_deictic = dictlist_deictic[i]\n        dict_npi = dictlist_npi[i]\n        internal_dictlist = [dict_test,dict_deictic,dict_npi]\n        scores = (compute_scores(dict_test),compute_scores(dict_deictic),compute_scores(dict_npi))\n        rows = []\n        for j in range(len(internal_dictlist)):\n            rows.append([\n                        internal_dictlist[j]['idx'], internal_dictlist[j]['type'],\n                        internal_dictlist[j]['text'],internal_dictlist[j]['options'][0],\n                        internal_dictlist[j]['options'][1],internal_dictlist[j]['main_verb'],\n                        internal_dictlist[j]['emb_verb'],internal_dictlist[j]['tense'],\n                        scores[j][0],scores[j][1]\n                        ])\n        writer.writerows(rows)\n    for i in range((quarter_perc*3),(quarter_perc*4)):\n        if i == quarter_perc*3 + 50:\n            print(\"reached 50!\")\n        if i == quarter_perc*3 + 1000:\n            print(\"reached 1k!\")\n        if i == quarter_perc*3 + 5000:\n            print(\"reached 5k!\")\n        dictionary = dictlist_perceptual[i]\n        scores = compute_scores(dictionary)\n        writer.writerow([\n                        dictionary['idx'], dictionary['type'], \n                        dictionary['text'], dictionary['options'][0],\n                        dictionary['options'][1], dictionary['main_verb'],\n                        dictionary['emb_verb'], dictionary['tense'],\n                        scores[0],scores[1]\n                        ])\n\nprint(\"Finished!\")\n","metadata":{"_uuid":"0ace7bd9-8468-43e2-be8e-e034567a409e","_cell_guid":"afcc9eb1-46a7-430a-9ae6-4c46dfcec0c2","collapsed":false,"jupyter":{"outputs_hidden":false},"trusted":true},"execution_count":null,"outputs":[]}]}
+import torch
+import json
+import string
+import csv
+from transformers import AutoTokenizer, AutoModelForMaskedLM
+
+print("Loading model and tokenizer.")
+
+tokenizer = AutoTokenizer.from_pretrained("../input/roberta-finetuned-for-wsc/")
+model = AutoModelForMaskedLM.from_pretrained("../input/roberta-finetuned-for-wsc/")
+
+model.eval()
+torch.no_grad()
+
+print("Model and Tokenizer ready!")
+
+#######################################################################
+######## Validating that the imported model does well on WSC ##########
+#######################################################################
+
+# Get Winograd validation set
+val_raw = open("../input/winograd/val.jsonl",encoding='utf-8')
+masktoken = "<mask>"
+(masktoken_id,) = set(tokenizer.encode(masktoken))-set([0,2])
+pctn = string.punctuation
+
+# Combines words into a sentence.
+def make_sentence(words: list):
+    running_string = ""
+    for i in range(len(words)):
+        if i < len(words)-1:
+            if words[i+1] == ".":
+                running_string = running_string+words[i]
+            else:
+                running_string = running_string+words[i]+" "
+        else:
+            running_string = running_string+words[i]
+    return running_string
+
+# Replaces pronoun with mask token in a test sentence.
+def mask_given_dict(sentence, dictionary):
+    pronoun_index = dictionary['target']['span2_index']
+    s_as_list = sentence.split()
+    s_as_list[pronoun_index] = masktoken
+    return make_sentence(s_as_list)
+
+print("Evaluating RoBERTa on WSC.")
+
+# Loop through the validation set,
+# feeding each one into the model.
+list_for_checking = []
+count = 0
+num_correct = 0
+for i in val_raw:
+    jsonned = json.loads(i)
+    text = jsonned['text']
+    # We replace the pronoun to resolve with a mask token.
+    masked_text = mask_given_dict(text,jsonned)
+    pronoun = jsonned['target']['span2_text']
+    tokenized = tokenizer(masked_text, return_tensors="pt")
+    logits = model(**tokenized).logits
+    mask_index = (tokenized['input_ids'][0]==masktoken_id).nonzero().item()
+    # We check, among all of the other words in the sentence,
+    # which one has the highest score to replace the mask token.
+    candidates = [tokenizer.encode(x) for x in masked_text.split()]
+    candidates = candidates + [tokenizer.encode(x) for x in [" "+y for y in masked_text.split()]]
+    cset = set()
+    for i in candidates:
+        for j in i:
+            cset.add(j)
+    cset = cset - set([0,2,masktoken_id])
+    notsoemptydict = dict()      
+    for i in cset:
+        notsoemptydict[i] = logits[:,mask_index,:][0][i]
+    pred_word = tokenizer.decode(max(notsoemptydict, key=notsoemptydict.get))
+    # We predict True if the selected word appears in the target span,
+    # and False otherwise.
+    if pred_word.strip() in jsonned['target']['span1_text']:
+        pred_label = True
+    else:
+        pred_label = False
+    if pred_label == jsonned['label']:
+        num_correct = num_correct+1
+    # print("Round ",'###',count,"###","over.")
+    count = count+1
+    list_for_checking.append([jsonned['target']['span1_text'],pred_word,jsonned['label'],pred_label])
+
+print("Accuracy: ",list_for_checking/count)
+
+#######################################################################
+# Ensuring that we only select professions that tokenize as one word. #
+#######################################################################
+
+print("Processing professions.")
+
+professions_raw = []
+with open("../input/professions/professions.txt",encoding='utf-8') as f:
+    for line in f:
+        professions_raw.append(line)
+for i in range(len(professions_raw)-1):
+    professions_raw[i] = professions_raw[i][:-1]
+
+professions_tokenized = {}
+for i in professions_raw:
+    professions_tokenized[i] = (tokenizer(i, return_tensors="pt"),tokenizer(' '+i, return_tensors="pt"))
+
+professions_available_with_space = []
+professions_available_no_space = []
+professions_available_both = []
+for i in professions_tokenized.keys():
+    if professions_tokenized[i][0]['input_ids'].shape[1] == 3:
+        professions_available_no_space.append(i)
+        if professions_tokenized[i][1]['input_ids'].shape[1] == 3:
+            professions_available_both.append(i)
+    if professions_tokenized[i][1]['input_ids'].shape[1] == 3:
+        professions_available_with_space.append(i)
+
+with open("professions-filtered.txt",mode='w',encoding='utf-8') as f:
+    for i in professions_available_with_space:
+        f.write(i+'\n')
+
+#######################################################################
+##################### Generating test sentences #######################
+#######################################################################
+
+print("Generating test sentences.")
+
+# Vowels used to determine if indefinite is "a" or "an".
+vowels = ['a','e','i','o','u']
+
+NPs_list = []
+with open("../input/professions/professions-filtered.txt",encoding="utf-8") as NPs:
+    for line in NPs:
+        NPs_list.append(line.casefold().strip())
+
+intensional_verbs_list = [[],[]]
+with open("../input/verbs-for-use/intensional_verbs.txt",encoding="utf-8") as intensional_verbs:            
+    for line in intensional_verbs:
+        temp = line.split('/')
+        intensional_verbs_list[0].append(temp[0].strip().casefold())
+        intensional_verbs_list[1].append(temp[1].strip().casefold())
+
+intensional_verbs_nf_list = [[],[]]
+with open("../input/verbs-for-use/intensional_verbs_nf.txt",encoding="utf-8") as intensional_verbs_nf: 
+    for line in intensional_verbs_nf:
+        temp = line.split('/')
+        intensional_verbs_nf_list[0].append(temp[0].strip().casefold())
+        intensional_verbs_nf_list[1].append(temp[1].strip().casefold())
+
+intransitive_verbs_list = []
+with open("../input/verbs-for-use/intransitive_verbs.txt",encoding="utf-8") as intransitive_verbs: 
+    for line in intransitive_verbs:
+        intransitive_verbs_list.append(line.casefold().strip())
+
+perceptual_verbs_list = [[],[]]
+with open("../input/verbs-for-use/perceptual_verbs.txt",encoding="utf-8") as perceptual_verbs: 
+    for line in perceptual_verbs:
+        temp = line.split('/')
+        perceptual_verbs_list[0].append(temp[0].strip())
+        perceptual_verbs_list[1].append(temp[1].strip())
+
+matrix_subjects = ["John","Mary"]
+
+def word2sentence(words: list):
+    string = ""
+    for word in words:
+        string = string+word+" "
+    string=string[:-1]+"."
+    return string
+
+def copula_generator(tense, tensedlist):
+    if tense == tensedlist[0]:
+        return "is"
+    if tense == tensedlist[1]:
+        return "was"
+
+def pst_or_prs(copula):
+    if copula == "is":
+        return "prs"
+    if copula == "was":
+        return "pst"
+
+deictic = "that"
+npi = "any"
+dictlist_test = []
+dictlist_deictic = []
+dictlist_npi = []
+dictlist_perceptual = []
+count=0
+
+# Code used to randomly select embedded subjects and embedded verbs:
+''' Here's how we got these indices:
+import random
+itv_numbers = random.sample(range(len(intransitive_verbs_list)-1),18)
+np_numbers = random.sample(range(len(NPs_list)-1),18)
+> itv_numbers
+[35, 18, 39, 23, 16, 46, 26, 41, 34, 33, 27, 2, 14, 32, 31, 3, 6, 42]
+> np_numbers
+[188, 161, 160, 72, 61, 6, 165, 123, 53, 35, 5, 195, 87, 11, 48, 187, 49, 175]
+'''
+
+# The resulting embedded subjects and embedded verbs:
+itv_numbers = [35, 18, 39, 23, 16, 46, 26, 41, 34, 33, 27, 2, 14, 32, 31, 3, 6, 42]
+np_numbers = [188, 161, 160, 72, 61, 6, 165, 123, 53, 35, 5, 195, 87, 11, 48, 187, 49, 175]
+intransitive_verbs_list = [intransitive_verbs_list[i] for i in itv_numbers]
+NPs_list = [NPs_list[i] for i in np_numbers]
+
+# Generating a dictionary of sentences and their data:
+for subject in matrix_subjects:
+    for tense in intensional_verbs_list:
+        for intransitive_verb in intransitive_verbs_list:
+            for np in NPs_list:
+                if np[0] in vowels:
+                    article = "an"
+                if np[0] not in vowels:
+                    article = "a"
+                for verb in tense:
+                    s1 = word2sentence([subject,verb,article,np,
+                                        copula_generator(tense, intensional_verbs_list),
+                                        intransitive_verb])
+                    s1_deictic = word2sentence([subject,verb,deictic,np,
+                                        copula_generator(tense, intensional_verbs_list),
+                                        intransitive_verb])
+                    s1_npi = word2sentence([subject,verb,npi,np,
+                                        copula_generator(tense, intensional_verbs_list),
+                                        intransitive_verb])
+                    s2 = "I met <mask>."
+                    text_test = s1+" "+s2
+                    text_deictic = s1_deictic+" "+s2
+                    text_npi = s1_npi+" "+s2
+                    ltest = text_test.split()
+                    ldeictic = text_deictic.split()
+                    lnpi = text_npi.split()
+                    dict_test = {"type": "test", "text":text_test,
+                                 "options":[subject,np],"mask_index":len(ltest)-1,
+                                 "idx": count,"tense": pst_or_prs(copula_generator(tense, intensional_verbs_list)), 
+                               "main_verb": verb, "emb_verb": intransitive_verb, "NP": np}
+                    dict_deictic = {"type": "deictic", "text":text_deictic,
+                                 "options":[subject,np],"mask_index":len(ldeictic)-1,
+                                 "idx": count,"tense": pst_or_prs(copula_generator(tense, intensional_verbs_list)), 
+                               "main_verb": verb, "emb_verb": intransitive_verb, "NP": np}
+                    dict_npi = {"type": "deictic", "text":text_npi,
+                                 "options":[subject,np],"mask_index":len(lnpi)-1,
+                                 "idx": count,"tense": pst_or_prs(copula_generator(tense, intensional_verbs_list)), 
+                               "main_verb": verb, "emb_verb": intransitive_verb, "NP": np}
+                    dictlist_test.append(dict_test)
+                    dictlist_deictic.append(dict_deictic)
+                    dictlist_npi.append(dict_npi) 
+                    count = count+1
+                    
+    for tense in intensional_verbs_nf_list:
+        for intransitive_verb in intransitive_verbs_list:
+            for np in NPs_list:
+                if np[0] in vowels:
+                    article = "an"
+                if np[0] not in vowels:
+                    article = "a"
+                for verb in tense:
+                    s1 = word2sentence([subject,verb,article,np,
+                                        "to","be",
+                                        intransitive_verb])
+                    s1_deictic = word2sentence([subject,verb,deictic,np,
+                                        "to","be",
+                                        intransitive_verb])
+                    s1_npi = word2sentence([subject,verb,npi,np,
+                                        "to","be",
+                                        intransitive_verb])
+                    s2 = "I met <mask>."
+                    text_test = s1+" "+s2
+                    text_deictic = s1_deictic+" "+s2
+                    text_npi = s1_npi+" "+s2
+                    ltest = text_test.split()
+                    ldeictic = text_deictic.split()
+                    lnpi = text_npi.split()
+                    dict_test = {"type": "test", "text":text_test,
+                                 "options":[subject,np],"mask_index":len(ltest)-1,
+                                 "idx": count,"tense": pst_or_prs(copula_generator(tense, intensional_verbs_nf_list)), 
+                               "main_verb": verb, "emb_verb": intransitive_verb, "NP": np}
+                    dict_deictic = {"type": "deictic", "text":text_deictic,
+                                 "options":[subject,np],"mask_index":len(ldeictic)-1,
+                                 "idx": count,"tense": pst_or_prs(copula_generator(tense, intensional_verbs_nf_list)), 
+                               "main_verb": verb, "emb_verb": intransitive_verb, "NP": np}
+                    dict_npi = {"type": "npi", "text":text_npi,
+                                 "options":[subject,np],"mask_index":len(lnpi)-1,
+                                 "idx": count,"tense": pst_or_prs(copula_generator(tense, intensional_verbs_nf_list)), 
+                               "main_verb": verb, "emb_verb": intransitive_verb, "NP": np}
+                    dictlist_test.append(dict_test)
+                    dictlist_deictic.append(dict_deictic)
+                    dictlist_npi.append(dict_npi)
+                    count = count+1
+                    
+    for tense in perceptual_verbs_list:
+        for intransitive_verb in intransitive_verbs_list:
+            for np in NPs_list:
+                if np[0] in vowels:
+                    article = "an"
+                if np[0] not in vowels:
+                    article = "a"
+                for verb in tense:
+                    s1 = word2sentence([subject,verb,article,np,intransitive_verb])
+                    s1_deictic = word2sentence([subject,verb,deictic,np,intransitive_verb])
+                    s2 = "I met <mask>."
+                    text_test = s1+" "+s2
+                    text_deictic = s1_deictic+" "+s2
+                    ltest = text_test.split()
+                    ldeictic = text_deictic.split()
+                    dict_test = {"type": "perc_reg", "text":text_test,
+                                 "options":[subject,np],"mask_index":len(ltest)-1,
+                                 "idx": count,"tense": pst_or_prs(copula_generator(tense, perceptual_verbs_list)), 
+                               "main_verb": verb, "emb_verb": intransitive_verb, "NP": np}
+                    dict_deictic = {"type": "perc_deictic", "text":text_deictic,
+                                 "options":[subject,np],"mask_index":len(ldeictic)-1,
+                                 "idx": count,"tense": pst_or_prs(copula_generator(tense, perceptual_verbs_list)), 
+                               "main_verb": verb, "emb_verb": intransitive_verb, "NP": np}
+                    dictlist_perceptual.append(dict_test)
+                    dictlist_perceptual.append(dict_deictic)
+                    count = count+1
+
+print("Lists ready!")
+
+with open('test_sentences.txt', 'w') as file:
+    for sentence in dictlist_test:
+        file.write(str(sentence)+'\n')
+    
+with open('deictic_sentences.txt', 'w') as file:
+    for sentence in dictlist_deictic:
+        file.write(str(sentence)+'\n')
+
+with open('npi_sentences.txt', 'w') as file:
+    for sentence in dictlist_npi:
+        file.write(str(sentence)+'\n')
+    
+with open('perceptual_sentences.txt', 'w') as file:
+    for sentence in dictlist_perceptual:
+        file.write(str(sentence)+'\n')
+
+
+#######################################################################
+#################### Computing Scores of Sentences ####################
+#######################################################################
+
+# Helper functions for computing scores for each sentence in the data.
+def compute_scores(dictionary: dict):
+    text = dictionary['text']
+    text_tokenized = tokenizer(text,return_tensors="pt")
+    logits_text = model(**text_tokenized).logits
+    mask_index = (text_tokenized['input_ids'][0]==masktoken_id).nonzero().item()
+    options = dictionary['options']
+    options_tokens = [tokenizer(" "+option)['input_ids'][1] for option in options]
+    scores = [logits_text[:,mask_index,:][0][token] for token in options_tokens]
+    return scores
+
+header = ["index","type","text","matrix_subject","emb_subject",
+          "matrix_verb","emb_verb","tense","matrix_subj_score","emb_subj_score"]
+
+n_indices_reg = len(dictlist_test)
+n_indices_perc = len(dictlist_perceptual)
+quarter_reg = int(n_indices_reg/4)
+quarter_perc = int(n_indices_perc/4)
+
+# Data is split into quarters to more easily run with limited GPU time.
+
+print("Generating model scores.")
+
+#################### QUARTER 1 ######################
+print("Computing on the first quarter of data.")
+with open('q1_of_data.csv', 'w',newline='') as file:
+    writer = csv.writer(file)
+    writer.writerow(header)
+    for i in range(quarter_reg):
+        if i == 50:
+            print("reached 50!")
+        if i == 1000:
+            print("reached 1k!")
+        if i == 5000:
+            print("reached 5k!")
+        if i == 10000:
+            print("reached 10k!")
+        dict_test = dictlist_test[i]
+        dict_deictic = dictlist_deictic[i]
+        dict_npi = dictlist_npi[i]
+        internal_dictlist = [dict_test,dict_deictic,dict_npi]
+        scores = (compute_scores(dict_test),compute_scores(dict_deictic),compute_scores(dict_npi))
+        rows = []
+        for j in range(len(internal_dictlist)):
+            rows.append([
+                        internal_dictlist[j]['idx'], internal_dictlist[j]['type'],
+                        internal_dictlist[j]['text'],internal_dictlist[j]['options'][0],
+                        internal_dictlist[j]['options'][1],internal_dictlist[j]['main_verb'],
+                        internal_dictlist[j]['emb_verb'],internal_dictlist[j]['tense'],
+                        scores[j][0],scores[j][1]
+                        ])
+        writer.writerows(rows)
+    for i in range(quarter_perc):
+        if i == 50:
+            print("reached 50!")
+        if i == 1000:
+            print("reached 1k!")
+        if i == 5000:
+            print("reached 5k!")
+        dictionary = dictlist_perceptual[i]
+        scores = compute_scores(dictionary)
+        writer.writerow([
+                        dictionary['idx'], dictionary['type'], 
+                        dictionary['text'], dictionary['options'][0],
+                        dictionary['options'][1], dictionary['main_verb'],
+                        dictionary['emb_verb'], dictionary['tense'],
+                        scores[0],scores[1]
+                        ])
+
+#################### QUARTER 2 ######################
+print("Computing on the second quarter of data.")
+with open('q2_of_data.csv', 'w',newline='') as file:
+    writer = csv.writer(file)
+    writer.writerow(header)
+    for i in range(quarter_reg,(quarter_reg*2)):
+        if i == quarter_reg + 50:
+            print("reached 50!")
+        if i == quarter_reg + 1000:
+            print("reached 1k!")
+        if i == quarter_reg + 5000:
+            print("reached 5k!")
+        if i == quarter_reg + 10000:
+            print("reached 10k!")
+        dict_test = dictlist_test[i]
+        dict_deictic = dictlist_deictic[i]
+        dict_npi = dictlist_npi[i]
+        internal_dictlist = [dict_test,dict_deictic,dict_npi]
+        scores = (compute_scores(dict_test),compute_scores(dict_deictic),compute_scores(dict_npi))
+        rows = []
+        for j in range(len(internal_dictlist)):
+            rows.append([
+                        internal_dictlist[j]['idx'], internal_dictlist[j]['type'],
+                        internal_dictlist[j]['text'],internal_dictlist[j]['options'][0],
+                        internal_dictlist[j]['options'][1],internal_dictlist[j]['main_verb'],
+                        internal_dictlist[j]['emb_verb'],internal_dictlist[j]['tense'],
+                        scores[j][0],scores[j][1]
+                        ])
+        writer.writerows(rows)
+    for i in range(quarter_perc,(quarter_perc*2)):
+        if i == quarter_perc + 50:
+            print("reached 50!")
+        if i == quarter_perc + 1000:
+            print("reached 1k!")
+        if i == quarter_perc + 5000:
+            print("reached 5k!")
+        dictionary = dictlist_perceptual[i]
+        scores = compute_scores(dictionary)
+        writer.writerow([
+                        dictionary['idx'], dictionary['type'], 
+                        dictionary['text'], dictionary['options'][0],
+                        dictionary['options'][1], dictionary['main_verb'],
+                        dictionary['emb_verb'], dictionary['tense'],
+                        scores[0],scores[1]
+                        ])
+
+
+#################### QUARTER 3 ######################
+print("Computing on the third quarter of data.")
+with open('q3_of_data.csv', 'w',newline='') as file:
+    writer = csv.writer(file)
+    writer.writerow(header)
+    for i in range((quarter_reg*2),(quarter_reg*3)):
+        if i == quarter_reg*2 + 50:
+            print("reached 50!")
+        if i == quarter_reg*2 + 1000:
+            print("reached 1k!")
+        if i == quarter_reg*2 + 5000:
+            print("reached 5k!")
+        if i == quarter_reg*2 + 10000:
+            print("reached 10k!")
+        dict_test = dictlist_test[i]
+        dict_deictic = dictlist_deictic[i]
+        dict_npi = dictlist_npi[i]
+        internal_dictlist = [dict_test,dict_deictic,dict_npi]
+        scores = (compute_scores(dict_test),compute_scores(dict_deictic),compute_scores(dict_npi))
+        rows = []
+        for j in range(len(internal_dictlist)):
+            rows.append([
+                        internal_dictlist[j]['idx'], internal_dictlist[j]['type'],
+                        internal_dictlist[j]['text'],internal_dictlist[j]['options'][0],
+                        internal_dictlist[j]['options'][1],internal_dictlist[j]['main_verb'],
+                        internal_dictlist[j]['emb_verb'],internal_dictlist[j]['tense'],
+                        scores[j][0],scores[j][1]
+                        ])
+        writer.writerows(rows)
+    for i in range((quarter_perc*2),(quarter_perc*3)):
+        if i == quarter_perc*2 + 50:
+            print("reached 50!")
+        if i == quarter_perc*2 + 1000:
+            print("reached 1k!")
+        if i == quarter_perc*2 + 5000:
+            print("reached 5k!")
+        dictionary = dictlist_perceptual[i]
+        scores = compute_scores(dictionary)
+        writer.writerow([
+                        dictionary['idx'], dictionary['type'], 
+                        dictionary['text'], dictionary['options'][0],
+                        dictionary['options'][1], dictionary['main_verb'],
+                        dictionary['emb_verb'], dictionary['tense'],
+                        scores[0],scores[1]
+                        ])
+    
+     
+#################### QUARTER 4 ######################
+print("Computing on the fourth quarter of data.")
+with open('q4_of_data.csv', 'w',newline='') as file:
+    writer = csv.writer(file)
+    writer.writerow(header)
+    for i in range((quarter_reg*3),(quarter_reg*4)):
+        if i == quarter_reg*3 + 50:
+            print("reached 50!")
+        if i == quarter_reg*3 + 1000:
+            print("reached 1k!")
+        if i == quarter_reg*3 + 5000:
+            print("reached 5k!")
+        if i == quarter_reg*3 + 10000:
+            print("reached 10k!")
+        dict_test = dictlist_test[i]
+        dict_deictic = dictlist_deictic[i]
+        dict_npi = dictlist_npi[i]
+        internal_dictlist = [dict_test,dict_deictic,dict_npi]
+        scores = (compute_scores(dict_test),compute_scores(dict_deictic),compute_scores(dict_npi))
+        rows = []
+        for j in range(len(internal_dictlist)):
+            rows.append([
+                        internal_dictlist[j]['idx'], internal_dictlist[j]['type'],
+                        internal_dictlist[j]['text'],internal_dictlist[j]['options'][0],
+                        internal_dictlist[j]['options'][1],internal_dictlist[j]['main_verb'],
+                        internal_dictlist[j]['emb_verb'],internal_dictlist[j]['tense'],
+                        scores[j][0],scores[j][1]
+                        ])
+        writer.writerows(rows)
+    for i in range((quarter_perc*3),(quarter_perc*4)):
+        if i == quarter_perc*3 + 50:
+            print("reached 50!")
+        if i == quarter_perc*3 + 1000:
+            print("reached 1k!")
+        if i == quarter_perc*3 + 5000:
+            print("reached 5k!")
+        dictionary = dictlist_perceptual[i]
+        scores = compute_scores(dictionary)
+        writer.writerow([
+                        dictionary['idx'], dictionary['type'], 
+                        dictionary['text'], dictionary['options'][0],
+                        dictionary['options'][1], dictionary['main_verb'],
+                        dictionary['emb_verb'], dictionary['tense'],
+                        scores[0],scores[1]
+                        ])
+
+print("Finished!")
