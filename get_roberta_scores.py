@@ -16,7 +16,7 @@ q4_df = pd.read_csv("csvfiles/q4_preprocessed.csv")
 qwise_dfs = {'q1':q1_df, 'q2':q2_df, 'q3':q3_df, 'q4':q4_df}
 
 scores = []
-q = os.getenv("quarter")
+q = os.getenv("quarter") # Set to 'q1', 'q2', 'q3' or 'q4' for corresponding chunks of data.
 
 df = qwise_dfs[q]
 
